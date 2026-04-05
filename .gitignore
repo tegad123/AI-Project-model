@@ -1,6 +1,5 @@
-# Secrets & config
+# Secrets
 .env
-config.py
 
 # Python
 __pycache__/
