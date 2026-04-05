@@ -33,6 +33,3 @@ MODEL_DESCRIPTION = (
     "dark eyebrows, full lips with nude-pink color, natural glam makeup with warm bronze "
     "eyeshadow and lash extensions, diamond pave cross pendant necklace on silver chain."
 )
-
-# Chrome remote debugging port — must match your Chrome for AI shortcut
-CHROME_DEBUG_PORT = int(os.getenv("CHROME_DEBUG_PORT", "9222"))

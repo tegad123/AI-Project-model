@@ -14,7 +14,7 @@ try:
     from config import (
         AMBER_DEFAULT_PATH, WAVESPEED_API_KEY, ANTHROPIC_API_KEY,
         WAVESPEED_MODEL, ASPECT_RATIO, RESOLUTION, COST_PER_IMAGE,
-        MODEL_NAME, MODEL_DESCRIPTION, CHROME_DEBUG_PORT
+        MODEL_NAME, MODEL_DESCRIPTION
     )
 except ImportError:
     messagebox.showerror(
@@ -108,13 +108,13 @@ def analyze_via_api(image_path, log_fn):
     """Use Anthropic API directly — requires ANTHROPIC_API_KEY in config."""
     if not ANTHROPIC_API_KEY:
         raise ValueError(
-            "No Anthropic API key in config.py.\n"
-            "Add your key to ANTHROPIC_API_KEY in config.py.\n"
-            "Get one free at console.anthropic.com"
+            "No Anthropic API key found.\n"
+            "Add your key to ANTHROPIC_API_KEY in your .env file.\n"
+            "Get one at console.anthropic.com"
         )
     log_fn("-> Sending to Claude API...")
     body = json.dumps({
-        "model": "claude-opus-4-5",
+        "model": "claude-sonnet-4-20250514",
         "max_tokens": 4096,
         "system": CLAUDE_SYSTEM,
         "messages": [{
@@ -148,180 +148,6 @@ def analyze_via_api(image_path, log_fn):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
     return json.loads(raw)
 
-
-def analyze_via_browser(image_path, log_fn):
-    """Use Claude.ai browser bot — free but requires Chrome for AI shortcut."""
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.keys import Keys
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.common.action_chains import ActionChains
-    from webdriver_manager.chrome import ChromeDriverManager
-    import pyperclip
-
-    log_fn("-> Connecting to Chrome...")
-    opts = Options()
-    opts.add_experimental_option("debuggerAddress", "127.0.0.1:" + str(CHROME_DEBUG_PORT))
-    try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-    except Exception as ex:
-        raise ValueError(
-            "Cannot connect to Chrome.\n\n"
-            "Steps:\n"
-            "1. Close all Chrome windows\n"
-            "2. Open Chrome using the 'Chrome for AI' batch file\n"
-            "3. Go to claude.ai and log in\n"
-            "4. Try again\n\n"
-            "Or add your Anthropic API key to config.py to skip Chrome entirely.\n\n"
-            "Detail: " + str(ex)
-        )
-
-    log_fn("Connected to Chrome")
-
-    try:
-        driver.get("https://claude.ai/new")
-        log_fn("-> Waiting for Claude.ai to load...")
-        time.sleep(7)
-
-        if "challenge" in driver.current_url or "verify" in driver.current_url.lower():
-            raise ValueError(
-                "Cloudflare bot check detected.\n\n"
-                "Go to Chrome, complete the verification, then try again.\n"
-                "Or add your Anthropic API key to config.py to skip Chrome entirely."
-            )
-
-        abs_path = os.path.abspath(image_path)
-        log_fn("-> Attaching image...")
-        uploaded = False
-
-        try:
-            inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            if inputs:
-                driver.execute_script("arguments[0].style.display='block';", inputs[0])
-                inputs[0].send_keys(abs_path)
-                time.sleep(3)
-                uploaded = True
-                log_fn("Image attached")
-        except Exception:
-            pass
-
-        if not uploaded:
-            try:
-                btns = driver.find_elements(By.CSS_SELECTOR,
-                    "button[aria-label*='ttach'], button[aria-label*='ile']")
-                if btns:
-                    btns[0].click()
-                    time.sleep(1)
-                    inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                    if inputs:
-                        inputs[0].send_keys(abs_path)
-                        time.sleep(3)
-                        uploaded = True
-            except Exception:
-                pass
-
-        if not uploaded:
-            log_fn("Warning: Could not auto-attach image")
-
-        log_fn("-> Finding input box...")
-        time.sleep(2)
-        text_el = None
-        for sel in ["div[contenteditable='true']", "div.ProseMirror",
-                    "div[role='textbox']", "textarea"]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in reversed(els):
-                    if el.is_displayed() and el.is_enabled():
-                        text_el = el
-                        break
-                if text_el:
-                    break
-            except Exception:
-                pass
-
-        if not text_el:
-            raise ValueError("Could not find Claude input. Is claude.ai loaded?")
-
-        text_el.click()
-        time.sleep(0.5)
-        pyperclip.copy(CLAUDE_PROMPT)
-        ActionChains(driver).key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
-        time.sleep(1.5)
-
-        log_fn("-> Sending to Claude...")
-        sent = False
-        try:
-            for btn in reversed(driver.find_elements(By.CSS_SELECTOR,
-                    "button[aria-label*='Send'], button[data-testid*='send']")):
-                if btn.is_displayed() and btn.is_enabled():
-                    btn.click()
-                    sent = True
-                    break
-        except Exception:
-            pass
-        if not sent:
-            ActionChains(driver).send_keys(Keys.RETURN).perform()
-
-        log_fn("-> Claude analyzing... (up to 2 min)")
-        time.sleep(10)
-
-        json_text = None
-        for i in range(45):
-            time.sleep(3)
-            try:
-                for msel in ["[data-testid='assistant-message']",
-                             ".font-claude-message", "div.prose"]:
-                    for msg in reversed(driver.find_elements(By.CSS_SELECTOR, msel)):
-                        try:
-                            txt = msg.text.strip()
-                            if txt.startswith("{") and "generation_parameters" in txt:
-                                json_text = txt
-                                break
-                            for c in msg.find_elements(By.CSS_SELECTOR, "code, pre"):
-                                t = c.text.strip()
-                                if t.startswith("{") and "generation_parameters" in t:
-                                    json_text = t
-                                    break
-                        except Exception:
-                            pass
-                        if json_text:
-                            break
-                    if json_text:
-                        break
-                if json_text:
-                    break
-            except Exception:
-                pass
-            if i % 4 == 0 and i > 0:
-                log_fn("  Waiting... (" + str(i * 3) + "s)")
-
-        if not json_text:
-            try:
-                for msel in ["[data-testid='assistant-message']", "div.prose"]:
-                    msgs = driver.find_elements(By.CSS_SELECTOR, msel)
-                    if msgs:
-                        json_text = msgs[-1].text.strip()
-                        break
-            except Exception:
-                pass
-
-        if not json_text:
-            raise ValueError("No JSON found. Try again or use API mode.")
-
-        if "```" in json_text:
-            for part in json_text.split("```"):
-                p = part.strip().lstrip("json").strip()
-                if p.startswith("{") and p.endswith("}"):
-                    json_text = p
-                    break
-
-        parsed = json.loads(json_text)
-        log_fn("Scene analysis complete!")
-        return parsed
-
-    except Exception:
-        raise
 
 
 # ── WaveSpeed ─────────────────────────────────────────────────────────────────
@@ -401,7 +227,6 @@ class App:
         self.root.resizable(False, False)
         self.root.configure(bg="#0a0a0a")
         self.scene_file = None
-        self.use_api = tk.BooleanVar(value=bool(ANTHROPIC_API_KEY))
         self._build_ui()
         threading.Thread(target=self._refresh_balance, daemon=True).start()
 
@@ -417,7 +242,7 @@ class App:
         hdr.pack(fill="x", padx=30, pady=(22, 0))
         tk.Label(hdr, text="AI MODEL POST GENERATOR",
                  font=("Georgia", 18, "bold"), fg=GOLD, bg=BG).pack(anchor="w")
-        tk.Label(hdr, text="Scene Analysis  ->  WaveSpeed 4K  ->  9:16",
+        tk.Label(hdr, text="Claude Sonnet Analysis  ->  WaveSpeed 4K  ->  9:16",
                  font=("Georgia", 9), fg=DIM, bg=BG).pack(anchor="w")
         tk.Frame(self.root, bg=GOLD, height=1).pack(fill="x", padx=30, pady=(10, 14))
 
@@ -458,28 +283,6 @@ class App:
                  fg=DIM, bg=CARD, anchor="w").pack(fill="x")
         self._check_model()
 
-        # Analysis mode toggle
-        mode_card = tk.Frame(self.root, bg=CARD, padx=16, pady=10)
-        mode_card.pack(fill="x", padx=30, pady=(0, 10))
-        tk.Label(mode_card, text="ANALYSIS MODE", font=("Courier", 9, "bold"),
-                 fg=DIM, bg=CARD).pack(anchor="w")
-        mode_row = tk.Frame(mode_card, bg=CARD)
-        mode_row.pack(fill="x", pady=(6, 0))
-        tk.Radiobutton(mode_row, text="Anthropic API  (paid ~$0.02, no Chrome needed)",
-                       variable=self.use_api, value=True,
-                       font=("Courier", 9), fg=TEXT, bg=CARD,
-                       selectcolor="#222", activebackground=CARD,
-                       command=self._update_mode).pack(anchor="w")
-        tk.Radiobutton(mode_row, text="Claude.ai Browser  (free, requires Chrome for AI)",
-                       variable=self.use_api, value=False,
-                       font=("Courier", 9), fg=TEXT, bg=CARD,
-                       selectcolor="#222", activebackground=CARD,
-                       command=self._update_mode).pack(anchor="w")
-        self.mode_hint = tk.Label(mode_card, text="", font=("Courier", 8),
-                                  fg=DIM, bg=CARD, anchor="w")
-        self.mode_hint.pack(fill="x", pady=(4, 0))
-        self._update_mode()
-
         # Scene picker
         sc = tk.Frame(self.root, bg=CARD, padx=16, pady=12)
         sc.pack(fill="x", padx=30, pady=(0, 10))
@@ -517,19 +320,6 @@ class App:
                            relief="flat", bd=0, state="disabled", wrap="word")
         self.log.pack(fill="both", expand=True, pady=(6, 0))
         self._log("Ready. Select a scene photo and click Generate.")
-
-    def _update_mode(self):
-        if self.use_api.get():
-            if ANTHROPIC_API_KEY:
-                self.mode_hint.config(text="API key found in config.py  Ready to go", fg="#4caf50")
-            else:
-                self.mode_hint.config(
-                    text="No API key in config.py  Add ANTHROPIC_API_KEY to use this mode",
-                    fg="#c94c4c")
-        else:
-            self.mode_hint.config(
-                text="Make sure Chrome for AI is open and claude.ai is loaded",
-                fg="#c9a84c")
 
     def _check_model(self):
         if os.path.exists(AMBER_DEFAULT_PATH):
@@ -590,13 +380,9 @@ class App:
         try:
             self._log("Starting pipeline...")
 
-            # Step 1 - Analyze
-            if self.use_api.get():
-                self._log("-> Analyzing via Anthropic API...")
-                result = analyze_via_api(self.scene_file, self._log)
-            else:
-                self._log("-> Analyzing via Claude.ai browser...")
-                result = analyze_via_browser(self.scene_file, self._log)
+            # Step 1 - Analyze scene via Claude API
+            self._log("-> Analyzing scene via Claude API...")
+            result = analyze_via_api(self.scene_file, self._log)
 
             base = os.path.splitext(self.scene_file)[0]
             with open(base + "_scene.json", "w", encoding="utf-8") as f:
