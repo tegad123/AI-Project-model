@@ -5,9 +5,12 @@ import json
 import os
 import threading
 import urllib.request
+import urllib.error
 import time
 import webbrowser
+import io
 from pathlib import Path
+from PIL import Image
 
 # ── Import config ────────────────────────────────────────────────────────────
 try:
@@ -39,62 +42,126 @@ WAVESPEED_PROMPT_TEMPLATE = (
 )
 
 CLAUDE_PROMPT = (
-    "Analyze this image and return ONLY a valid JSON object with no markdown, "
-    "no explanation, just raw JSON using exactly this structure:\n\n"
-    "{\"metadata\":{\"confidence_score\":\"...\",\"image_type\":\"...\",\"primary_purpose\":\"...\"},"
-    "\"composition\":{\"rule_applied\":\"...\",\"aspect_ratio\":\"...\",\"layout\":\"...\","
-    "\"focal_points\":[],\"visual_hierarchy\":\"...\",\"balance\":\"...\"},"
-    "\"color_profile\":{\"dominant_colors\":[{\"color\":\"...\",\"hex\":\"...\","
-    "\"percentage\":\"...\",\"role\":\"...\"}],\"color_palette\":\"...\","
-    "\"temperature\":\"...\",\"saturation\":\"...\",\"contrast\":\"...\"},"
-    "\"lighting\":{\"type\":\"...\",\"source_count\":\"...\",\"direction\":\"...\","
-    "\"directionality\":\"...\",\"quality\":\"...\",\"intensity\":\"...\","
-    "\"contrast_ratio\":\"...\",\"mood\":\"...\","
-    "\"shadows\":{\"type\":\"...\",\"density\":\"...\",\"placement\":\"...\",\"length\":\"...\"},"
-    "\"highlights\":{\"treatment\":\"...\",\"placement\":\"...\"},"
-    "\"ambient_fill\":\"...\",\"light_temperature\":\"...\"},"
-    "\"technical_specs\":{\"medium\":\"...\",\"style\":\"...\",\"texture\":\"...\","
-    "\"sharpness\":\"...\",\"grain\":\"...\",\"depth_of_field\":\"...\",\"perspective\":\"...\"},"
-    "\"artistic_elements\":{\"genre\":\"...\",\"influences\":[],\"mood\":\"...\","
-    "\"atmosphere\":\"...\",\"visual_style\":\"...\"},"
-    "\"subject_analysis\":{\"primary_subject\":\"...\",\"positioning\":\"...\","
-    "\"scale\":\"...\",\"interaction\":\"...\","
-    "\"facial_expression\":{\"mouth\":\"...\",\"smile_intensity\":\"...\",\"eyes\":\"...\","
-    "\"eyebrows\":\"...\",\"overall_emotion\":\"...\",\"authenticity\":\"...\"},"
-    "\"hair\":{\"length\":\"...\",\"cut\":\"...\",\"texture\":\"...\","
-    "\"texture_quality\":\"...\",\"natural_imperfections\":\"...\",\"styling\":\"...\","
-    "\"styling_detail\":\"...\",\"part\":\"...\",\"volume\":\"...\",\"color_detail\":\"...\"},"
-    "\"makeup\":{\"eyes\":\"...\",\"brows\":\"...\",\"lips\":\"...\","
-    "\"foundation\":\"...\",\"overall_style\":\"...\"},"
-    "\"accessories\":{},"
-    "\"clothing\":{\"garment\":\"...\",\"fabric\":\"...\",\"neckline\":\"...\","
-    "\"sleeve\":\"...\",\"fit\":\"...\",\"details\":\"...\"},"
-    "\"body_positioning\":{\"posture\":\"...\",\"angle\":\"...\","
-    "\"weight_distribution\":\"...\",\"shoulders\":\"...\"},"
-    "\"hands_and_gestures\":{\"right_hand\":\"...\",\"left_hand\":\"...\","
-    "\"hand_tension\":\"...\",\"naturalness\":\"...\"}},"
-    "\"background\":{\"setting_type\":\"...\",\"spatial_depth\":\"...\","
-    "\"elements_detailed\":[{\"item\":\"...\",\"position\":\"...\",\"distance\":\"...\","
-    "\"size\":\"...\",\"condition\":\"...\",\"specific_features\":\"...\"}],"
-    "\"wall_surface\":{\"material\":\"...\",\"surface_treatment\":\"...\",\"texture\":\"...\","
-    "\"finish\":\"...\",\"color\":\"...\",\"color_variation\":\"...\","
-    "\"features\":\"...\",\"wear_indicators\":\"...\"},"
-    "\"floor_surface\":{\"material\":\"...\",\"color\":\"...\",\"pattern\":\"...\"},"
-    "\"objects_catalog\":\"...\",\"background_treatment\":\"...\"},"
-    "\"generation_parameters\":{\"prompts\":[\"...\",\"...\"],\"keywords\":[],"
-    "\"technical_settings\":\"...\",\"post_processing\":\"...\"}}"
+    "Analyze this image and return ONLY raw valid JSON. No markdown. No explanation. No code fences.\n\n"
+    "Use precisely this structure:\n\n"
+    '{"pipeline_meta":{"task":"face_replacement_scene_reconstruction",'
+    '"preserve_elements":["background","lighting","body_pose","clothing","accessories","camera_angle","depth_of_field","color_grading"],'
+    '"replace_elements":["face_identity"],'
+    '"model_reference_slot":"INSERT_MODEL_REFERENCE_IMAGE_PATH_HERE",'
+    '"confidence_score":"...","image_type":"...","primary_purpose":"..."},'
+
+    '"camera_profile":{"shot_type":"...","focal_length_estimate":"...",'
+    '"camera_distance_to_subject":"...","angle_relative_to_subject":"...",'
+    '"lens_distortion":"...","sensor_type_estimate":"...",'
+    '"selfie_or_photographer":"...","tilt_roll_degrees":"..."},'
+
+    '"composition":{"rule_applied":"...","aspect_ratio":"...","layout":"...",'
+    '"focal_points":[],"visual_hierarchy":"...","balance":"...",'
+    '"subject_frame_percentage":"...","head_position_in_frame":"...","crop_tight_loose":"..."},'
+
+    '"color_profile":{"dominant_colors":[{"color":"...","hex":"...",'
+    '"percentage":"...","role":"..."}],"color_palette":"...",'
+    '"temperature":"...","saturation":"...","contrast":"...",'
+    '"lut_style":"...","vignette":"...","color_grading_notes":"..."},'
+
+    '"lighting":{"type":"...","source_count":"...","direction":"...",'
+    '"directionality":"...","quality":"...","intensity":"...",'
+    '"contrast_ratio":"...","mood":"...",'
+    '"shadows":{"type":"...","density":"...","placement":"...","length":"..."},'
+    '"highlights":{"treatment":"...","placement":"..."},'
+    '"ambient_fill":"...","light_temperature":"...",'
+    '"skin_lighting_interaction":"...","catch_lights_in_eyes":"...","face_lighting_ratio":"..."},'
+
+    '"technical_specs":{"medium":"...","style":"...","texture":"...",'
+    '"sharpness":"...","grain":"...","depth_of_field":"...",'
+    '"bokeh_quality":"...","perspective":"...","motion_blur":"...","noise_level":"..."},'
+
+    '"artistic_elements":{"genre":"...","influences":[],"mood":"...",'
+    '"atmosphere":"...","visual_style":"...","editing_style":"..."},'
+
+    '"face_transplant_guide":{"head_size_relative_to_frame":"...",'
+    '"face_angle_yaw_degrees":"...","face_angle_pitch_degrees":"...",'
+    '"face_angle_roll_degrees":"...","chin_position":"...","jaw_width_estimate":"...",'
+    '"forehead_visibility":"...","occlusions_on_face":"...","neck_visibility":"...",'
+    '"skin_tone_zone":"...","skin_tone_hex_estimate":"...",'
+    '"expression_to_preserve":{"mouth":"...","smile_intensity":"...","eyes":"...",'
+    '"eyebrows":"...","overall_emotion":"...","authenticity":"..."},'
+    '"face_blend_notes":"..."},'
+
+    '"subject_analysis":{"primary_subject":"...","positioning":"...",'
+    '"scale":"...","interaction":"...",'
+    '"hair":{"length":"...","cut":"...","texture":"...",'
+    '"texture_quality":"...","natural_imperfections":"...","styling":"...",'
+    '"styling_detail":"...","part":"...","volume":"...","color_detail":"...",'
+    '"flyaways":"...","sheen":"..."},'
+    '"makeup":{"eyes":"...","brows":"...","lips":"...",'
+    '"foundation":"...","overall_style":"...","finish":"..."},'
+    '"accessories":{},'
+    '"clothing":{"garment":"...","fabric":"...","neckline":"...",'
+    '"sleeve":"...","fit":"...","details":"...","color":"...","texture_description":"..."},'
+    '"body_positioning":{"posture":"...","angle":"...",'
+    '"weight_distribution":"...","shoulders":"...","visible_body_parts":"..."},'
+    '"hands_and_gestures":{"right_hand":"...","left_hand":"...",'
+    '"hand_tension":"...","naturalness":"..."}},'
+
+    '"background":{"setting_type":"...","time_of_day":"...","weather_or_conditions":"...",'
+    '"spatial_depth":"...",'
+    '"elements_detailed":[{"item":"...","position":"...","distance":"...",'
+    '"size":"...","condition":"...","specific_features":"..."}],'
+    '"surface_materials":{"primary":"...","secondary":"...","texture_notes":"..."},'
+    '"background_treatment":"...","background_blur_amount":"...","background_prompt":"..."},'
+
+    '"generation_parameters":{"structured_prompts":{'
+    '"scene_environment":"...",'
+    '"subject_body_pose":"...",'
+    '"face_replacement_directive":"photorealistic face of [MODEL_REFERENCE], [FACE_ANGLE_FROM_face_transplant_guide], [EXPRESSION_FROM_face_transplant_guide], seamlessly blended, skin tone matched to scene lighting",'
+    '"lighting_directive":"...",'
+    '"camera_lens_directive":"...",'
+    '"style_quality_directive":"photorealistic, high resolution, 8K, sharp focus, professional photography, natural skin texture, no airbrushing"},'
+    '"final_positive_prompt_assembly":"...",'
+    '"negative_prompts":["deformed face","wrong face identity","blurry face","extra limbs",'
+    '"bad anatomy","low quality","watermark","cartoon","painting","illustration",'
+    '"distorted proportions","mismatched skin tone","double face","face artifacts"],'
+    '"controlnet_hints":{"use_openpose":true,"use_depth_map":true,"use_face_id_adapter":true,'
+    '"ip_adapter_face_strength":"0.8","controlnet_pose_strength":"0.7","controlnet_depth_strength":"0.5"},'
+    '"technical_settings":{"sampler":"DPM++ 2M Karras","steps":"35","cfg_scale":"7",'
+    '"denoising_strength":"0.55","face_restoration":"CodeFormer","face_restoration_weight":"0.7"},'
+    '"post_processing":"..."}}'
 )
 
 CLAUDE_SYSTEM = (
-    "You are an expert image analyst. Analyze the provided photo and return ONLY "
-    "a valid JSON object with no markdown, no explanation, just raw JSON."
+    "You are a specialized computational photographer and AI image pipeline engineer. "
+    "Your SOLE purpose is to analyze a reference scene photo and output a precision JSON "
+    "object that will be used by a Wavespeed AI image generator to reconstruct the scene "
+    "with a specific model's face injected in place of the original subject.\n\n"
+    "You are NOT describing the image for human readers. You are producing structured "
+    "generation data for a machine. Every field must be specific, technical, and actionable.\n\n"
+    "YOUR TWO-PART TASK:\n"
+    "1. Capture the SCENE (background, lighting, environment, camera settings) — preserve this exactly.\n"
+    "2. Capture the SUBJECT POSE and BODY — preserve this exactly.\n"
+    "3. Flag the FACE as the REPLACEMENT ZONE — this will be swapped with the model reference.\n\n"
+    "CRITICAL RULES:\n"
+    "- Return ONLY raw valid JSON. No markdown. No explanation. No code fences.\n"
+    "- Use precise, Stable Diffusion / Flux-compatible prompt language in all text fields.\n"
+    "- Never describe the face identity of the original subject — only describe face geometry, "
+    "angle, and expression (which must be preserved when the model's face is inserted).\n"
+    "- All prompt fields must use comma-separated keyword phrases optimized for Wavespeed/Flux.\n"
+    "- Distinguish clearly between elements to PRESERVE (scene, body, pose, lighting) "
+    "and elements to REPLACE (face identity only)."
 )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def to_b64(path):
-    with open(path, "rb") as f:
-        return base64.standard_b64encode(f.read()).decode()
+def to_b64(path, max_size=2048, quality=85):
+    """Encode image as base64 JPEG, resizing if needed to reduce payload."""
+    img = Image.open(path)
+    img = img.convert("RGB")
+    # Resize if either dimension exceeds max_size, preserving aspect ratio
+    if max(img.size) > max_size:
+        img.thumbnail((max_size, max_size), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return base64.standard_b64encode(buf.getvalue()).decode()
 
 def get_media_type(path):
     return {
@@ -114,8 +181,8 @@ def analyze_via_api(image_path, log_fn):
         )
     log_fn("-> Sending to Claude API...")
     body = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4096,
+        "model": "claude-opus-4-20250514",
+        "max_tokens": 8192,
         "system": CLAUDE_SYSTEM,
         "messages": [{
             "role": "user",
@@ -167,8 +234,8 @@ def get_balance():
 def call_wavespeed(scene_path, model_path, prompt, log_fn):
     body = json.dumps({
         "images": [
-            {"type": "base64", "media_type": get_media_type(model_path), "data": to_b64(model_path)},
-            {"type": "base64", "media_type": get_media_type(scene_path), "data": to_b64(scene_path)}
+            to_b64(model_path),
+            to_b64(scene_path)
         ],
         "prompt": prompt,
         "aspect_ratio": ASPECT_RATIO,
@@ -177,17 +244,32 @@ def call_wavespeed(scene_path, model_path, prompt, log_fn):
         "enable_sync_mode": False
     }).encode()
 
-    req = urllib.request.Request(
-        "https://api.wavespeed.ai/api/v3/" + WAVESPEED_MODEL,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + WAVESPEED_API_KEY
-        },
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        resp = json.loads(r.read())
+    resp = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            "https://api.wavespeed.ai/api/v3/" + WAVESPEED_MODEL,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + WAVESPEED_API_KEY
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                resp = json.loads(r.read())
+            break
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            raise ValueError(f"WaveSpeed API error ({e.code}): {error_body}")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt < 2:
+                log_fn(f"  Upload attempt {attempt+1} failed, retrying in 5s...")
+                time.sleep(5)
+            else:
+                raise
+    if resp is None:
+        raise ValueError("WaveSpeed upload failed after 3 attempts")
 
     pred_id = resp.get("data", {}).get("id") or resp.get("id")
     if not pred_id:
@@ -281,7 +363,6 @@ class App:
                  font=("Courier", 11, "bold"), fg=TEXT, bg=CARD, anchor="w").pack(fill="x", pady=(4, 0))
         tk.Label(mc, text=AMBER_DEFAULT_PATH, font=("Courier", 8),
                  fg=DIM, bg=CARD, anchor="w").pack(fill="x")
-        self._check_model()
 
         # Scene picker
         sc = tk.Frame(self.root, bg=CARD, padx=16, pady=12)
@@ -298,7 +379,7 @@ class App:
 
         # Generate button
         self.gen_btn = tk.Button(self.root,
-                                 text="GENERATE POST  --  $0.204",
+                                 text="GENERATE POST  --  $0.208",
                                  font=("Georgia", 14, "bold"),
                                  bg=GOLD, fg="#000", relief="flat",
                                  cursor="hand2", pady=16,
@@ -319,6 +400,7 @@ class App:
         self.log = tk.Text(lc, height=6, bg="#0f0f0f", fg=TEXT, font=("Courier", 10),
                            relief="flat", bd=0, state="disabled", wrap="word")
         self.log.pack(fill="both", expand=True, pady=(6, 0))
+        self._check_model()
         self._log("Ready. Select a scene photo and click Generate.")
 
     def _check_model(self):
@@ -412,7 +494,7 @@ class App:
             self.root.after(0, lambda msg=err: messagebox.showerror("Error", msg))
         finally:
             self.root.after(0, lambda: self._set_busy(False))
-            self.root.after(0, lambda: self.gen_btn.config(text="GENERATE POST  --  $0.204"))
+            self.root.after(0, lambda: self.gen_btn.config(text="GENERATE POST  --  $0.208"))
 
 
 if __name__ == "__main__":

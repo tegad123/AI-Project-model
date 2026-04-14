@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 # Path to your reference model image (set in .env, works on Windows/macOS/Linux)
 AMBER_DEFAULT_PATH = str(Path(os.getenv("AMBER_DEFAULT_PATH", "")))
@@ -23,7 +23,7 @@ WAVESPEED_MODEL = "google/nano-banana-pro/edit"
 # Image output settings — do not change unless WaveSpeed updates pricing
 ASPECT_RATIO   = "9:16"
 RESOLUTION     = "4k"
-COST_PER_IMAGE = 0.204
+COST_PER_IMAGE = 0.208
 
 # Model description — used in the generation prompt
 MODEL_NAME = "Amber"
