@@ -16,9 +16,14 @@ AMBER_DEFAULT_PATH = str(Path(os.getenv("AMBER_DEFAULT_PATH", "")))
 # API keys (loaded from .env)
 WAVESPEED_API_KEY = os.getenv("WAVESPEED_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+VENICE_API_KEY = os.getenv("VENICE_API_KEY", "")
 
 # WaveSpeed model to use
 WAVESPEED_MODEL = "google/nano-banana-pro/edit"
+
+# Venice.ai settings (multi-edit endpoint for permissive face-swap / composite)
+VENICE_MODEL = "grok-imagine-edit"
+VENICE_COST_PER_IMAGE = 0.05  # placeholder — adjust to match actual Venice pricing
 
 # Image output settings — do not change unless WaveSpeed updates pricing
 ASPECT_RATIO   = "9:16"

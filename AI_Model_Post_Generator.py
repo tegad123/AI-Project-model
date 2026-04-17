@@ -17,7 +17,8 @@ try:
     from config import (
         AMBER_DEFAULT_PATH, WAVESPEED_API_KEY, ANTHROPIC_API_KEY,
         WAVESPEED_MODEL, ASPECT_RATIO, RESOLUTION, COST_PER_IMAGE,
-        MODEL_NAME, MODEL_DESCRIPTION
+        MODEL_NAME, MODEL_DESCRIPTION,
+        VENICE_API_KEY, VENICE_MODEL, VENICE_COST_PER_IMAGE,
     )
 except ImportError:
     messagebox.showerror(
@@ -151,6 +152,43 @@ CLAUDE_SYSTEM = (
 )
 
 
+# ── Venice prompt generator ──────────────────────────────────────────────────
+# Venice's qwen-edit model sees both images directly, so the prompt must NOT
+# describe the scene. It should be a short imperative edit directive focused
+# only on the face swap. Claude generates this prompt from MODEL_DESCRIPTION.
+VENICE_CLAUDE_SYSTEM = (
+    "You help generate one instruction string for Venice.ai's image multi-edit API.\n\n"
+    "Target endpoint:\n"
+    "- POST https://api.venice.ai/api/v1/image/multi-edit\n"
+    '- modelId: "qwen-edit"\n'
+    "- images[0] = base scene photo\n"
+    "- images[1] = clear reference portrait of the target person\n"
+    "- safe_mode is handled by the client, you do not mention it.\n\n"
+    "The API already sees both images, so you MUST NOT describe the background, "
+    "pose, camera, clothing, furniture, or environment. You only describe the "
+    "target person's facial identity.\n\n"
+    "Your job:\n"
+    "1) Insert the provided model_name into the fixed face-swap template below.\n"
+    "2) Construct a concise model_description (max ~200 characters) describing "
+    "only the face: face shape, skin tone, eyes, nose, lips, hair, age range, "
+    "and general expression.\n\n"
+    "Use this exact template, replacing {model_name} and {model_description}:\n\n"
+    '"Use the first image as the base photo.\n'
+    "Use the second image only as a reference for the face of {model_name}.\n"
+    "Replace only the face in the base photo with the face from the reference image.\n"
+    "Do not change the body shape, curves, pose, camera angle, crop, or position of the body.\n"
+    "Do not change the hair length, hair style, clothing, jewelry, hands, or any objects in the room.\n"
+    "Do not change the background, furniture, pillows, windows, or lighting.\n"
+    "Keep the composition and shadows exactly the same as in the base photo.\n"
+    "Make the edit photorealistic and seamless so it looks like a real, unedited photograph of {model_name}.\n"
+    'Their facial identity should match this description: {model_description}."\n\n'
+    "Output requirements:\n"
+    "- Return ONE plain text string: the final prompt with {model_name} and {model_description} filled in.\n"
+    "- No JSON, no Markdown, no extra commentary.\n"
+    "- Total length must stay well under 1500 characters."
+)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def to_b64(path, max_size=2048, quality=85):
     """Encode image as base64 JPEG, resizing if needed to reduce payload."""
@@ -181,15 +219,15 @@ def analyze_via_api(image_path, log_fn):
         )
     log_fn("-> Sending to Claude API...")
     body = json.dumps({
-        "model": "claude-opus-4-20250514",
-        "max_tokens": 8192,
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 4096,
         "system": CLAUDE_SYSTEM,
         "messages": [{
             "role": "user",
             "content": [
                 {"type": "image", "source": {
                     "type": "base64",
-                    "media_type": get_media_type(image_path),
+                    "media_type": "image/jpeg",
                     "data": to_b64(image_path)
                 }},
                 {"type": "text", "text": CLAUDE_PROMPT}
@@ -207,13 +245,56 @@ def analyze_via_api(image_path, log_fn):
         },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        raise ValueError(f"Claude API error ({e.code}): {error_body}")
 
     raw = data["content"][0]["text"].strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
     return json.loads(raw)
+
+
+def generate_venice_prompt(model_name, face_traits, log_fn):
+    """Ask Claude to produce the Venice edit-directive string from face traits."""
+    if not ANTHROPIC_API_KEY:
+        raise ValueError("No Anthropic API key. Add ANTHROPIC_API_KEY to .env")
+    user_msg = (
+        f"model_name: {model_name}\n\n"
+        f"Face traits for model_description:\n{face_traits}\n\n"
+        "Generate the final prompt string using the template from the system message.\n"
+        "Return only that single prompt line, nothing else."
+    )
+    body = json.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "system": VENICE_CLAUDE_SYSTEM,
+        "messages": [{"role": "user", "content": user_msg}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    log_fn("-> Generating Venice edit prompt via Claude...")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Claude API error ({e.code}): {e.read().decode()}")
+    text = data["content"][0]["text"].strip()
+    # Strip accidental code fences
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return text
 
 
 
@@ -300,6 +381,120 @@ def download_image(url, path):
     urllib.request.urlretrieve(url, path)
 
 
+# ── Venice.ai ─────────────────────────────────────────────────────────────────
+def build_venice_prompt(scene_json, model_description, max_chars=1400):
+    """Build a concise prompt from the Claude analysis JSON for Venice models.
+
+    Uses the pre-assembled prompt fields in the JSON if available, otherwise
+    composes a short directive. Caps at max_chars to fit qwen-edit's 1500 limit.
+    """
+    gen = scene_json.get("generation_parameters", {}) if isinstance(scene_json, dict) else {}
+    final = gen.get("final_positive_prompt_assembly")
+    structured = gen.get("structured_prompts", {})
+
+    if final and isinstance(final, str):
+        core = final
+    elif structured:
+        parts = [
+            structured.get("scene_environment", ""),
+            structured.get("subject_body_pose", ""),
+            structured.get("lighting_directive", ""),
+            structured.get("camera_lens_directive", ""),
+            structured.get("style_quality_directive", ""),
+        ]
+        core = ", ".join(p for p in parts if p)
+    else:
+        core = "photorealistic portrait, high quality, 4K"
+
+    directive = (
+        f"Replace the face of the subject in image 2 (scene) with the face of the model in image 1. "
+        f"Model: {model_description} Scene: {core}"
+    )
+    if len(directive) > max_chars:
+        directive = directive[:max_chars - 3] + "..."
+    return directive
+
+
+def call_venice(scene_path, model_path, prompt, log_fn, negative_prompt=None):
+    """Call Venice.ai /image/multi-edit with safe_mode=False. Returns (kind, payload)."""
+    if not VENICE_API_KEY:
+        raise ValueError("No Venice API key. Add VENICE_API_KEY to .env")
+    # Venice requires data URI prefix so it can detect image format.
+    # For /image/multi-edit, images[0] is the base and subsequent images are
+    # edit layers — so scene goes first and the face reference goes second.
+    def _data_uri(path):
+        return "data:image/jpeg;base64," + to_b64(path)
+    payload = {
+        "modelId": VENICE_MODEL,
+        "prompt": prompt,
+        "images": [_data_uri(scene_path), _data_uri(model_path)],
+        "safe_mode": False,
+    }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        "https://api.venice.ai/api/v1/image/multi-edit",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + VENICE_API_KEY,
+        },
+        method="POST",
+    )
+    log_fn("-> Generating via Venice.ai (safe_mode=off)...")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            resp_bytes = r.read()
+            content_type = r.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Venice API error ({e.code}): {e.read().decode()}")
+
+    if content_type.startswith("image/"):
+        return ("bytes", resp_bytes)
+    resp = json.loads(resp_bytes)
+    url = resp.get("url") or resp.get("data", {}).get("url")
+    if url:
+        return ("url", url)
+    b64 = (resp.get("image")
+           or resp.get("data", {}).get("image")
+           or (resp.get("images", [None])[0] if resp.get("images") else None))
+    if b64:
+        return ("b64", b64)
+    raise ValueError(f"Unexpected Venice response: {resp}")
+
+
+def save_output(kind, payload, path):
+    """Save a generator result to disk, given its (kind, payload) form."""
+    if kind == "url":
+        download_image(payload, path)
+    elif kind == "bytes":
+        with open(path, "wb") as f:
+            f.write(payload)
+    elif kind == "b64":
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(payload))
+    else:
+        raise ValueError(f"Unknown output kind: {kind}")
+
+
+def compress_image(path, quality=82):
+    """Re-save JPEG at reduced quality, preserving ICC profile and resolution."""
+    img = Image.open(path)
+    source_format = img.format
+    icc = img.info.get("icc_profile")
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    save_kwargs = {
+        "format": "JPEG",
+        "quality": quality,
+        "optimize": True,
+    }
+    if source_format == "JPEG":
+        save_kwargs["subsampling"] = "keep"
+    if icc:
+        save_kwargs["icc_profile"] = icc
+    img.save(path, **save_kwargs)
+
+
 # ── Main App ──────────────────────────────────────────────────────────────────
 class App:
     def __init__(self, root):
@@ -384,7 +579,16 @@ class App:
                                  bg=GOLD, fg="#000", relief="flat",
                                  cursor="hand2", pady=16,
                                  command=self._start)
-        self.gen_btn.pack(fill="x", padx=30, pady=(0, 10))
+        self.gen_btn.pack(fill="x", padx=30, pady=(0, 6))
+
+        # Venice generate button (permissive mode)
+        self.venice_btn = tk.Button(self.root,
+                                    text=f"GENERATE (VENICE) — ${VENICE_COST_PER_IMAGE:.3f}",
+                                    font=("Georgia", 13, "bold"),
+                                    bg="#8a5aff", fg="#fff", relief="flat",
+                                    cursor="hand2", pady=12,
+                                    command=self._start_venice)
+        self.venice_btn.pack(fill="x", padx=30, pady=(0, 10))
 
         # Progress
         self.progress = ttk.Progressbar(self.root, mode="indeterminate")
@@ -443,6 +647,7 @@ class App:
 
     def _set_busy(self, busy):
         self.gen_btn.config(state="disabled" if busy else "normal")
+        self.venice_btn.config(state="disabled" if busy else "normal")
         self.progress.start(10) if busy else self.progress.stop()
 
     def _start(self):
@@ -457,6 +662,19 @@ class App:
         self._set_busy(True)
         self.gen_btn.config(text="Working...")
         threading.Thread(target=self._run, daemon=True).start()
+
+    def _start_venice(self):
+        if not self.scene_file:
+            messagebox.showwarning("No Scene", "Please select a scene photo first.")
+            return
+        if not os.path.exists(AMBER_DEFAULT_PATH):
+            messagebox.showerror("Model Not Found",
+                "Model image not found at:\n" + AMBER_DEFAULT_PATH +
+                "\n\nUpdate AMBER_DEFAULT_PATH in config.py")
+            return
+        self._set_busy(True)
+        self.venice_btn.config(text="Working...")
+        threading.Thread(target=self._run_venice, daemon=True).start()
 
     def _run(self):
         try:
@@ -482,7 +700,11 @@ class App:
 
             out = base + "_generated.jpg"
             download_image(url, out)
-            self._log("Done! Saved: " + os.path.basename(out))
+            original_size = os.path.getsize(out)
+            compress_image(out)
+            compressed_size = os.path.getsize(out)
+            self._log(f"  Compressed: {original_size // 1024}KB -> {compressed_size // 1024}KB")
+            self._log("Done! Saved to: " + out)
 
             self.root.after(0, self._refresh_balance)
             self.root.after(0, lambda: messagebox.showinfo(
@@ -495,6 +717,48 @@ class App:
         finally:
             self.root.after(0, lambda: self._set_busy(False))
             self.root.after(0, lambda: self.gen_btn.config(text="GENERATE POST  --  $0.208"))
+
+    def _run_venice(self):
+        try:
+            self._log("Starting pipeline (Venice)...")
+            base = os.path.splitext(self.scene_file)[0]
+
+            # Step 1 - Generate a concise edit directive via Claude.
+            # Venice/qwen-edit sees both images directly, so we do NOT describe
+            # the scene — only the face identity. MODEL_DESCRIPTION feeds the
+            # face traits; Claude returns the final prompt string.
+            venice_prompt = generate_venice_prompt(
+                MODEL_NAME, MODEL_DESCRIPTION, self._log
+            )
+            # Safety cap for qwen-edit's 1500 char limit
+            if len(venice_prompt) > 1400:
+                venice_prompt = venice_prompt[:1400]
+            self._log(f"  Venice prompt: {len(venice_prompt)} chars")
+
+            # Step 2 - Call Venice with scene as base image, reference as layer
+            kind, payload = call_venice(
+                self.scene_file, AMBER_DEFAULT_PATH, venice_prompt, self._log
+            )
+
+            out = base + "_venice.jpg"
+            save_output(kind, payload, out)
+            original_size = os.path.getsize(out)
+            compress_image(out)
+            compressed_size = os.path.getsize(out)
+            self._log(f"  Compressed: {original_size // 1024}KB -> {compressed_size // 1024}KB")
+            self._log("Done! Saved to: " + out)
+
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Done!", "Venice image saved!\n\n" + out))
+
+        except Exception as ex:
+            err = str(ex)
+            self._log("Error: " + err)
+            self.root.after(0, lambda msg=err: messagebox.showerror("Error", msg))
+        finally:
+            self.root.after(0, lambda: self._set_busy(False))
+            self.root.after(0, lambda: self.venice_btn.config(
+                text=f"GENERATE (VENICE) — ${VENICE_COST_PER_IMAGE:.3f}"))
 
 
 if __name__ == "__main__":
